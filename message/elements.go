@@ -26,10 +26,10 @@ type GroupImageElement struct {
 }
 
 type VoiceElement struct {
-	Name         string
-	Md5          []byte
-	Size         int32
-	DownloadPara string
+	Name string
+	Md5  []byte
+	Size int32
+	Url  string
 
 	// --- sending ---
 	Data []byte
@@ -70,6 +70,14 @@ type ReplyElement struct {
 	Elements []IMessageElement
 
 	//original []*msg.Elem
+}
+
+type ShortVideoElement struct {
+	Name string
+	Uuid []byte
+	Size int32
+	Md5  []byte
+	Url  string
 }
 
 type ServiceElement struct {
@@ -198,6 +206,10 @@ func (e *GroupVoiceElement) Type() ElementType {
 
 func (e *VoiceElement) Type() ElementType {
 	return Voice
+}
+
+func (e *ShortVideoElement) Type() ElementType {
+	return Video
 }
 
 var faceMap = map[int]string{

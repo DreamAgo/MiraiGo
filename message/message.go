@@ -79,8 +79,9 @@ const (
 	Reply
 	Service
 	Forward
-	File // Voice?
+	File
 	Voice
+	Video
 )
 
 func (s *Sender) IsAnonymous() bool {
@@ -424,6 +425,14 @@ func ParseMessageElems(elems []*msg.Elem) []IMessageElement {
 				// TODO: 解析具体的APP
 				return append(res, NewText(content))
 			}
+		}
+		if elem.VideoFile != nil {
+			return append(res, &ShortVideoElement{
+				Name: string(elem.VideoFile.FileName),
+				Uuid: elem.VideoFile.FileUuid,
+				Size: elem.VideoFile.FileSize,
+				Md5:  elem.VideoFile.FileMd5,
+			})
 		}
 		if elem.Text != nil {
 			if len(elem.Text.Attr6Buf) == 0 {
