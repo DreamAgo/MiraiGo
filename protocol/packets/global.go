@@ -1,14 +1,21 @@
 package packets
 
 import (
-	"errors"
+	"strconv"
+
+	"github.com/pkg/errors"
+
 	"github.com/Mrs4s/MiraiGo/binary"
 	"github.com/Mrs4s/MiraiGo/protocol/crypto"
-	"strconv"
 )
 
-var ErrUnknownFlag = errors.New("unknown flag")
-var ErrDecryptFailed = errors.New("decrypt failed")
+var (
+	ErrUnknownFlag    = errors.New("unknown flag")
+	ErrInvalidPayload = errors.New("invalid payload")
+	ErrDecryptFailed  = errors.New("decrypt failed")
+	ErrSessionExpired = errors.New("session expired")
+	ErrPacketDropped  = errors.New("packet dropped")
+)
 
 type ISendingPacket interface {
 	CommandId() uint16
@@ -29,65 +36,83 @@ type IEncryptMethod interface {
 }
 
 func BuildOicqRequestPacket(uin int64, commandId uint16, encrypt IEncryptMethod, key []byte, bodyFunc func(writer *binary.Writer)) []byte {
-	b := binary.NewWriter()
-	bodyFunc(b)
-
-	body := encrypt.DoEncrypt(b.Bytes(), key)
-	p := binary.NewWriter()
-	p.WriteByte(0x02)
-	p.WriteUInt16(27 + 2 + uint16(len(body)))
-	p.WriteUInt16(8001)
-	p.WriteUInt16(commandId)
-	p.WriteUInt16(1)
-	p.WriteUInt32(uint32(uin))
-	p.WriteByte(3)
-	p.WriteByte(encrypt.Id())
-	p.WriteByte(0)
-	p.WriteUInt32(2)
-	p.WriteUInt32(0)
-	p.WriteUInt32(0)
-	p.Write(body)
-	p.WriteByte(0x03)
-	return p.Bytes()
+	body := encrypt.DoEncrypt(binary.NewWriterF(bodyFunc), key)
+	return binary.NewWriterF(func(p *binary.Writer) {
+		p.WriteByte(0x02)
+		p.WriteUInt16(27 + 2 + uint16(len(body)))
+		p.WriteUInt16(8001)
+		p.WriteUInt16(commandId)
+		p.WriteUInt16(1)
+		p.WriteUInt32(uint32(uin))
+		p.WriteByte(3)
+		p.WriteByte(encrypt.Id())
+		p.WriteByte(0)
+		p.WriteUInt32(2)
+		p.WriteUInt32(0)
+		p.WriteUInt32(0)
+		p.Write(body)
+		p.WriteByte(0x03)
+	})
 }
 
-func BuildSsoPacket(seq uint16, commandName, imei string, extData, outPacketSessionId, body, ksid []byte) []byte {
-	p := binary.NewWriter()
-	p.WriteIntLvPacket(4, func(writer *binary.Writer) {
-		writer.WriteUInt32(uint32(seq))
-		writer.WriteUInt32(537062409) // Android pad (sub app id)
-		writer.WriteUInt32(537062409)
-		writer.Write([]byte{0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00})
-		if len(extData) == 0 || len(extData) == 4 {
-			writer.WriteUInt32(0x04)
-		} else {
-			writer.WriteUInt32(uint32(len(extData) + 4))
-			writer.Write(extData)
-		}
-		writer.WriteString(commandName)
-		writer.WriteUInt32(0x08)
-		writer.Write(outPacketSessionId)
-		writer.WriteString(imei)
-		writer.WriteUInt32(0x04)
-		{
-			writer.WriteUInt16(uint16(len(ksid)) + 2)
-			writer.Write(ksid)
-		}
-		writer.WriteUInt32(0x04)
+func BuildCode2DRequestPacket(seq uint32, j uint64, cmd uint16, bodyFunc func(writer *binary.Writer)) []byte {
+	return binary.NewWriterF(func(w *binary.Writer) {
+		body := binary.NewWriterF(bodyFunc)
+		w.WriteByte(2)
+		w.WriteUInt16(uint16(43 + len(body) + 1))
+		w.WriteUInt16(cmd)
+		w.Write(make([]byte, 21))
+		w.WriteByte(3)
+		w.WriteUInt16(0)
+		w.WriteUInt16(50) // version
+		w.WriteUInt32(seq)
+		w.WriteUInt64(j)
+		w.Write(body)
+		w.WriteByte(3)
 	})
+}
 
-	p.WriteIntLvPacket(4, func(writer *binary.Writer) {
-		writer.Write(body)
+func BuildSsoPacket(seq uint16, appID, subAppID uint32, commandName, imei string, extData, outPacketSessionId, body, ksid []byte) []byte {
+	return binary.NewWriterF(func(p *binary.Writer) {
+		p.WriteIntLvPacket(4, func(writer *binary.Writer) {
+			writer.WriteUInt32(uint32(seq))
+			writer.WriteUInt32(appID)
+			writer.WriteUInt32(subAppID)
+			writer.Write([]byte{0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00})
+			if len(extData) == 0 || len(extData) == 4 {
+				writer.WriteUInt32(0x04)
+			} else {
+				writer.WriteUInt32(uint32(len(extData) + 4))
+				writer.Write(extData)
+			}
+			writer.WriteString(commandName)
+			writer.WriteIntLvPacket(4, func(w *binary.Writer) {
+				w.Write(outPacketSessionId)
+			})
+			writer.WriteString(imei)
+			writer.WriteUInt32(0x04)
+			{
+				writer.WriteUInt16(uint16(len(ksid)) + 2)
+				writer.Write(ksid)
+			}
+			writer.WriteUInt32(0x04)
+		})
+
+		p.WriteIntLvPacket(4, func(writer *binary.Writer) {
+			writer.Write(body)
+		})
 	})
-	return p.Bytes()
 }
 
 func ParseIncomingPacket(payload, d2key []byte) (*IncomingPacket, error) {
+	if len(payload) < 6 {
+		return nil, errors.WithStack(ErrInvalidPayload)
+	}
 	reader := binary.NewReader(payload)
 	flag1 := reader.ReadInt32()
 	flag2 := reader.ReadByte()
 	if reader.ReadByte() != 0 { // flag3
-		return nil, ErrUnknownFlag
+		// return nil, errors.WithStack(ErrUnknownFlag)
 	}
 	reader.ReadString() // uin string
 	decrypted := func() (data []byte) {
@@ -104,10 +129,10 @@ func ParseIncomingPacket(payload, d2key []byte) (*IncomingPacket, error) {
 		return nil
 	}()
 	if len(decrypted) == 0 {
-		return nil, ErrDecryptFailed
+		return nil, errors.WithStack(ErrDecryptFailed)
 	}
 	if flag1 != 0x0A && flag1 != 0x0B {
-		return nil, ErrDecryptFailed
+		return nil, errors.WithStack(ErrDecryptFailed)
 	}
 	return parseSsoFrame(decrypted, flag2)
 }
@@ -115,22 +140,25 @@ func ParseIncomingPacket(payload, d2key []byte) (*IncomingPacket, error) {
 func parseSsoFrame(payload []byte, flag2 byte) (*IncomingPacket, error) {
 	reader := binary.NewReader(payload)
 	if reader.ReadInt32()-4 > int32(reader.Len()) {
-		return nil, errors.New("dropped")
+		return nil, errors.WithStack(ErrPacketDropped)
 	}
-	seqId := reader.ReadInt32()
+	seqID := reader.ReadInt32()
 	retCode := reader.ReadInt32()
 	if retCode != 0 {
+		if retCode == -10008 {
+			return nil, errors.WithStack(ErrSessionExpired)
+		}
 		return nil, errors.New("return code unsuccessful: " + strconv.FormatInt(int64(retCode), 10))
 	}
 	reader.ReadBytes(int(reader.ReadInt32()) - 4) // extra data
 	commandName := reader.ReadString()
-	sessionId := reader.ReadBytes(int(reader.ReadInt32()) - 4)
+	sessionID := reader.ReadBytes(int(reader.ReadInt32()) - 4)
 	if commandName == "Heartbeat.Alive" {
 		return &IncomingPacket{
-			SequenceId:  uint16(seqId),
+			SequenceId:  uint16(seqID),
 			Flag2:       flag2,
 			CommandName: commandName,
-			SessionId:   sessionId,
+			SessionId:   sessionID,
 			Payload:     []byte{},
 		}, nil
 	}
@@ -154,15 +182,15 @@ func parseSsoFrame(payload []byte, flag2 byte) (*IncomingPacket, error) {
 		return nil
 	}()
 	return &IncomingPacket{
-		SequenceId:  uint16(seqId),
+		SequenceId:  uint16(seqID),
 		Flag2:       flag2,
 		CommandName: commandName,
-		SessionId:   sessionId,
+		SessionId:   sessionID,
 		Payload:     packet,
 	}, nil
 }
 
-func (pkt *IncomingPacket) DecryptPayload(random []byte) ([]byte, error) {
+func (pkt *IncomingPacket) DecryptPayload(random, sessionKey []byte) ([]byte, error) {
 	reader := binary.NewReader(pkt.Payload)
 	if reader.ReadByte() != 2 {
 		return nil, ErrUnknownFlag
@@ -189,8 +217,14 @@ func (pkt *IncomingPacket) DecryptPayload(random []byte) ([]byte, error) {
 		}()
 		return data, nil
 	}
+	if encryptType == 3 {
+		return func() []byte {
+			d := reader.ReadBytes(reader.Len() - 1)
+			return binary.NewTeaCipher(sessionKey).Decrypt(d)
+		}(), nil
+	}
 	if encryptType == 4 {
 		panic("todo")
 	}
-	return nil, ErrUnknownFlag
+	return nil, errors.WithStack(ErrUnknownFlag)
 }
